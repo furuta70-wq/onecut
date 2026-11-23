@@ -530,7 +530,7 @@ const FOLEY_SAMPLES = {"rate":24000,"clips":{"armGlance":["AADY/6/+yv5EBJgGvwO6A
 const COUNTDOWN_TIME = 3000;
 const BASE_HIT_DAMAGE = 10;
 const CLASH_DAMAGE = 5;
-const MAX_HIT_DAMAGE = 30;
+const MAX_ATTACK_STAGE = 5;
 const RECENT_TAKES = 3;
 const RUSH_WINDOW = 34;
 const READY = 'phrase:0';
@@ -579,8 +579,6 @@ const STRIKE_NAMES = Object.freeze({
   redLowArc: '低鞭腿',
   blueInsideSweep: '内掃腿',
   redInsideSweep: '内掃腿',
-  blueLegFinish: '接腿摔',
-  redLegFinish: '接腿摔',
   blueFinishLow: '地走掃腿',
   redFinishLow: '伏地掃腿',
 });
@@ -591,18 +589,19 @@ function resolveExchange(state, blue, red, style = 'quick') {
   const inputs=[blue,red];
   const ties=state.ties??0;
   const first=blue&&red?state.attacker:blue?0:red?1:state.attacker;
+  const attackStage=first===state.attacker?(state.attackStage??1):1;
   const later=1-first;
   const attack=inputs[first];
   const receive=inputs[later];
   const incoming=attack?.tier??state.contact;
   const result={kind:'brush',lead:first,attacker:first,scored:null,step,ties,incoming,tier:incoming,
-    guardTier:receive?.tier,done:false};
+    guardTier:receive?.tier,attackStage,nextAttackStage:attackStage,done:false};
 
   if(!attack)return {...result,done:true};
-  const hitDamage=Math.min(MAX_HIT_DAMAGE,BASE_HIT_DAMAGE+ties*CLASH_DAMAGE);
+  const hitDamage=BASE_HIT_DAMAGE+(attackStage-1)*CLASH_DAMAGE;
   if(!receive || (incoming+1)%3===receive.tier){
     return {...result,kind:'hit',scored:first,hitDamage,
-      cycleTier:receive?incoming:null,instant:step===1,done:true};
+      cycleTier:receive?incoming:null,done:true};
   }
   if(incoming!==receive.tier){
     if(first===1&&(receive.rushed||receive.at>=attack.at)){
@@ -610,17 +609,17 @@ function resolveExchange(state, blue, red, style = 'quick') {
     }
     if(first===0&&attack.rushed&&receive.counterReady){
       return {...result,kind:'hit',lead:later,attacker:later,scored:later,tier:receive.tier,
-        incoming:receive.tier,cycleTier:receive.tier,hitDamage,
-        instant:step===1,done:true};
+        incoming:receive.tier,cycleTier:receive.tier,attackStage:1,hitDamage:BASE_HIT_DAMAGE,done:true};
     }
     const catchesLeg = incoming===2 && receive.tier===1 && !state.legTaken;
-    return {...result,kind:'turn',attacker:later,tier:receive.tier,cycleTier:receive.tier,
+    return {...result,kind:'turn',attacker:later,tier:receive.tier,cycleTier:receive.tier,nextAttackStage:1,
       ...(catchesLeg?{heldLeg:later}:{})};
   }
   const openingUpperStop=incoming===0&&UPPER_STOP.includes(state.takes?.at(-1));
-  const takesArm=(first===0||(!receive.rushed&&receive.at<attack.at)) && !openingUpperStop && !(ties===3&&incoming===1) && style!=='kick' && incoming<2 && state.previousTier<2 && state.previousTier!=null
+  const takesArm=(first===0||(!receive.rushed&&receive.at<attack.at)) && !openingUpperStop && !(attackStage===4&&incoming===1) && style!=='kick' && incoming<2 && state.previousTier<2 && state.previousTier!=null
     && state.lastKind==='bind' && state.distance==='close' && !state.pulled;
-  return {...result,kind:takesArm?'pull':'bind',attacker:takesArm?later:first,ties:ties+1};
+  return {...result,kind:takesArm?'pull':'bind',attacker:takesArm?later:first,ties:ties+1,
+    nextAttackStage:takesArm?1:Math.min(MAX_ATTACK_STAGE,attackStage+1)};
 }
 
 const byId = id => document.getElementById(id);
@@ -865,16 +864,25 @@ function glowAt(x,y,radius,fill,alpha) {
   context.fillRect(x-radius,y-radius,radius*2,radius*2);
 }
 
+function choiceAttackStage(now) {
+  // The next choice opens after the outgoing contact or reversal is shown.
+  const {attackStage,clashAt,initiativeAt}=animation??{};
+  const handoff=initiativeAt??clashAt??(animation?.clearsClashes?animation.cycleMark?.at:null);
+  if(beat&&handoff!=null&&animationAge(now)<handoff)return attackStage;
+  return beat?.attackStage??attackStage??1;
+}
+
 function paintReadCue(now) {
   if(!beat||beat.attacker!==1||beat.opponent.sitsOut||now<beat.cueAt||now>=beat.opponent.at)return;
   const {hintTier,style,at}=beat.opponent;
+  const rank=beat.attackStage-1;
   const {color,y}=TIER_LIGHTS[hintTier];
   const age=now-beat.cueAt;
   const quick=style==='quick';
   const edge=W+3;
   const drawIn=smooth(clamp(age/(quick?52:88),0,1));
   const handoff=1-smooth(clamp((now-beat.hintAt)/87,0,1));
-  const neutralReach=22+drawIn*(quick?38:63);
+  const neutralReach=22+drawIn*((quick?38:63)+rank*9);
   const haze=sweepGradient(edge,edge-neutralReach,CONTACT_LIGHT,drawIn*handoff*.28);
   const neutral=H*.51;
   ribbon(edge,neutral-32,edge-neutralReach,neutral-16,15,7,haze);
@@ -882,23 +890,29 @@ function paintReadCue(now) {
   if(now<beat.hintAt)return true;
   const charge=clamp((now-beat.hintAt)/(at-beat.hintAt),0,1);
   const rise=quick?easeOut(charge):smooth(clamp(charge*1.65,0,1));
-  const reach=24+rise*(quick?57:101);
+  const reach=24+rise*((quick?57:101)+rank*22);
   const height=H*y;
-  const strength=rise*(quick?.54:.59);
+  const strength=rise*((quick?.54:.59)+rank*.07);
   const light=sweepGradient(edge,edge-reach,color,strength);
   const slant=style==='kick'?-13:quick?5:12;
   const poised=smooth(clamp((now-beat.openAt-RUSH_WINDOW)/24,0,1));
-  ribbon(edge,height,edge-reach,height+slant,12+rise*(quick?4:11),slant*.65,light);
+  for(let i=0;i<rank;i++){
+    const lane=(i%2===0?1:-1)*(17+Math.floor(i/2)*13);
+    const flare=smooth(clamp(rise*1.36-i*.095,0,1));
+    const tip=height+slant+lane*.26;
+    ribbon(edge,height+lane,edge-reach*(.64+flare*.23-i*.052),tip,
+      (3.8+rank*.92)*flare,lane*.23,light);
+  }
+  ribbon(edge,height,edge-reach,height+slant,12+rise*((quick?4:11)+rank*2),slant*.65,light);
   ribbon(edge,height-1,edge-reach*(.62+poised*.22),height+slant*.75,2.5,-2,
     sweepGradient(edge,edge-reach,bright(color),strength*(.40+poised*.22)));
-  glowAt(edge-2,height,24+rise*12,color,strength*.38);
+  glowAt(edge-2,height,24+rise*(12+rank*5),color,strength*.38);
   return true;
 }
 
-function paintChoice(side,choice,count,now,opacity,clash) {
+function paintChoice(side,choice,stage,now,opacity,clash) {
   if(!choice||opacity<.005)return;
-  const extraGlow=1-6/Math.max(6,count);
-  count=visibleClashes(count);
+  const rank=stage-1;
   const age=Math.max(0,now-choice.at);
   const {color,y}=choiceTone(choice,now);
   const extend=easeOut(clamp(age/101,0,1));
@@ -910,21 +924,21 @@ function paintChoice(side,choice,count,now,opacity,clash) {
   const power=Math.max(committed?.76:0,.38+trail*.51+pulse*.24+confirmation*.18)*opacity;
   const sign=side===0?1:-1;
   const edge=side===0?-7:W+7;
-  const groups=Math.max(1,count);
-  const spread=19+count*5.9;
-  const center=clamp(H*y,75+(groups-1)*spread/2,H-111-(groups-1)*spread/2);
-  const reach=(102+count*34)*(1-.15*pulse*motionScale)*(.53+wind*.47)+trail*26;
-  const halo=sweepGradient(edge,edge+sign*reach,color,power*(.34+count*.028+extraGlow*.24));
+  const spread=19+rank*7;
+  const center=clamp(H*y,75+rank*spread/2,H-111-rank*spread/2);
+  const reach=(102+rank*37)*(1-.15*pulse*motionScale)*(.53+wind*.47)+trail*26;
+  const halo=sweepGradient(edge,edge+sign*reach,color,power*(.34+rank*.06));
   const tint=sweepGradient(edge,edge+sign*reach,color,power*.99);
   const silk=sweepGradient(edge,edge+sign*reach,bright(color),power*.90);
   const afterglow=choice.from?.color&&age<126?sweepGradient(edge,edge+sign*reach*.54,choice.from.color,power*(1-age/126)*.44):null;
-  for(let i=0;i<groups;i++){
-    const lane=i-(groups-1)/2;
+  for(let i=0;i<stage;i++){
+    const lane=i-rank/2;
     const root=center+lane*spread;
     const tip=mix(root,H*y,.58)+sign*(i%2===0?3.4:-2.5);
-    const born=clash&&i===groups-1?.72+.28*easeOut(clamp((now-clash.at)/91,0,1)):1;
+    const growing=clash?.attackStage===rank&&i===rank;
+    const born=growing?.72+.28*easeOut(clamp((now-clash.at)/91,0,1)):1;
     const path=reach*(1-Math.abs(lane)*.064)*born;
-    const width=(9.3+count*1.45+trail*3.5+pulse*4.7)*born;
+    const width=(9.3+rank*1.7+trail*3.5+pulse*4.7)*born;
     const bend=(4-lane*3.4)*motionScale;
     if(afterglow)ribbon(edge,root,edge+sign*path*.62,tip,width*.78,bend,afterglow);
     ribbon(edge,root,edge+sign*path,tip,width*3.1,bend,halo);
@@ -932,7 +946,7 @@ function paintChoice(side,choice,count,now,opacity,clash) {
     ribbon(edge,root-1.6,edge+sign*path*.94,tip,width*.28,bend*.94,silk);
     ribbon(edge,root-width*.89,edge+sign*path*.81,tip-2,2.35,-bend*.65,tint);
   }
-  if(confirmation>0)glowAt(edge,H*y,34+count*5,bright(color),confirmation*.62*opacity);
+  if(confirmation>0)glowAt(edge,H*y,34+rank*6,bright(color),confirmation*.62*opacity);
 }
 
 function contactPoint(now,side,tier) {
@@ -952,19 +966,19 @@ function damageDuration(flash) {
 
 function incomingFocus(now) {
   if(damageFlash||!animation?.scoringHit||phase!=='fight')return null;
-  const {damage:side,at}=animation.scoringHit;
+  const {damage:side,at,amount}=animation.scoringHit;
+  const count=(amount-BASE_HIT_DAMAGE)/CLASH_DAMAGE;
   const tier=animation.hitTier;
-  const lead=42+visibleClashes(clashCount)*11+(animation.finishStyle==='quick'?0:12);
+  const lead=42+count*11+(animation.finishStyle==='quick'?0:12);
   const until=at-animationAge(now);
   if(until>lead||until<0)return null;
-  return {tier,side,point:contactPoint(animation.start+at,side,tier),progress:smooth(1-until/lead)};
+  return {tier,side,count,point:contactPoint(animation.start+at,side,tier),progress:smooth(1-until/lead)};
 }
 
 function paintFocus(focus) {
-  const {tier,side,point,progress}=focus;
+  const {tier,side,count,point,progress}=focus;
   const {color,y}=TIER_LIGHTS[tier];
   const from=side===0?0:W;
-  const count=visibleClashes(clashCount);
   const width=32+count*16;
   const intensity=progress*motionScale;
   const brush=sweepGradient(from,point.x,color,intensity*.37);
@@ -1052,7 +1066,7 @@ function paintContactDetails(now) {
   if(phase!=='fight'&&phase!=='final')return;
   if(clashFlash&&now-clashFlash.at<140){
     const {point,key,tier,at}=clashFlash;
-    const count=visibleClashes(clashFlash.count);
+    const count=clashFlash.attackStage-1;
     const age=now-at;
     const progress=clamp(age/140,0,1);
     const energy=(1-progress)**2.4*motionScale;
@@ -1088,12 +1102,11 @@ function paintContactDetails(now) {
 
 function paintClashTransfer(now) {
   if(!clashTransfer)return;
-  const {at,from,to,tier,count,point}=clashTransfer;
+  const {at,from,to,tier,attackStage:layers,point}=clashTransfer;
   const progress=clamp((now-at)/244,0,1);
   if(progress===1)return;
   const target=to===0?0:W;
   const direction=to===0?-1:1;
-  const layers=visibleClashes(count);
   const {color,y}=TIER_LIGHTS[tier];
   const origin=mix(point.x,from===0?0:W,.62);
   const front=mix(origin,target,easeOut(progress));
@@ -1114,14 +1127,15 @@ function paintEffects(now) {
     const damageFade=damageFlash?1-smooth(clamp((now-damageFlash.at)/96,0,1)):1;
     const choiceFade=damageFade*(focus?1-focus.progress*.68:1);
     const pendingTell=phase==='fight'&&paintReadCue(now);
+    const attackStage=choiceAttackStage(now);
     for(let side=0;side<2;side++){
       const fading=fadingChoices;
       if(fading&&!chosenTiers[side]){
         const out=1-smooth(clamp((now-fading.at)/183,0,1));
-        paintChoice(side,fading.choices[side],fading.count,now,out*choiceFade,null);
+        paintChoice(side,fading.choices[side],fading.attackStage,now,out*choiceFade,null);
       }
       const choiceLight=side===1&&pendingTell?choiceFade*.22:choiceFade;
-      paintChoice(side,chosenTiers[side],clashCount,now,choiceLight,clashFlash);
+      paintChoice(side,chosenTiers[side],attackStage,now,choiceLight,clashFlash);
     }
     paintClashTransfer(now);
     if(focus)paintFocus(focus);
@@ -1585,7 +1599,6 @@ const FOLLOW_TAKES = [
   ]
 ];
 const PRESS_TAKES = ['bluePress','redPress'];
-const CONTACT_RESULTS = ['bind','turn','pull','evade'];
 const LEG_RECEIVE=['blueLegReceive','redLegReceive'];
 const LEG_FINISH=['blueLegFinish','redLegFinish'];
 const LEG_RELEASE=['blueLegRelease','redLegRelease'];
@@ -1605,8 +1618,7 @@ const BODY_KICK=['blueBodyRound','redBodyRound'];
 const BODY_KICK_GUARD=['blueBodyRoundGuard','redBodyRoundGuard'];
 const SWEEP_FALLS=new Set(['lowCounter','redFinishLow','blueFinishLow',...LEG_FINISH,...INSIDE_SWEEP]);
 
-const inClimax = state => state.step >= 3 && (state.ties ?? 0) >= 2;
-const middleLocked=state=>state.ties===4&&state.previousTier===1&&state.lastKind==='bind';
+const middleLocked=state=>MIDDLE_LOCK.includes(state.takes.at(-1));
 const openAfterLow=state=>state.previousTier===2&&state.distance==='open'&&state.heldLeg==null;
 
 function keepsPreviousPose(state) {
@@ -1616,26 +1628,25 @@ function keepsPreviousPose(state) {
 }
 
 function hitAfterContact(before,result) {
-  const {scored:side,tier}=result;
+  const {scored:side,tier,attackStage}=result;
   const prior=before.previousTier;
-  const big=inClimax(before);
-  const close=before.distance==='close';
-  if(tier===2){
-    if(before.heldLeg===side)return {names:[LEG_FINISH[side]],advance:17,distance:'open'};
-    if(big&&close&&prior===2)return {names:[FINISH_TAKES[side][tier]],advance:34,distance:'open'};
-    if(close&&prior===1)return {names:[INSIDE_SWEEP[side]],advance:14,distance:'close'};
-    if(big||prior===0)return {names:[LOW_ARC[side]],advance:big?30:22,distance:'open'};
+  if(attackStage===1)return {names:[INSTANT_TAKES[side][tier]],advance:25,distance:'open'};
+  if(attackStage===2){
+    const entry=tier===0?0:tier===2&&prior!==1?2:(prior??tier);
+    return {names:[FOLLOW_TAKES[side][entry][tier]],advance:26,distance:'open'};
   }
-  if(tier===1&&middleLocked(before))return {names:[MIDDLE_FINISH[side]],advance:side===0?17:25,distance:'open'};
-  if(tier===1&&openAfterLow(before))return {names:[BODY_KICK[side]],advance:big?32:23,distance:'open'};
-  if(tier===1&&!big&&close&&before.grip==null){
-    if(prior===0)return {names:[BODY_HOOK[side]],advance:16,distance:'close'};
-    if(prior===1&&before.lastKind==='bind')return {names:[BODY_PUSH[side]],advance:25,distance:'open'};
+  if(attackStage===3){
+    const take=[FOLLOW_TAKES[side][prior===2?2:1][0],
+      prior===0?BODY_HOOK[side]:BODY_PUSH[side],LOW_ARC[side]][tier];
+    return {names:[take],advance:tier===1?24:29,distance:'open'};
   }
-  if(tier===0&&big)return {names:[(close?HIGH_RISE:HIGH_ARC)[side]],advance:close?24:38,distance:'open'};
-  const follow=!big&&CONTACT_RESULTS.includes(before.lastKind)&&prior!=null;
-  return {names:[follow?FOLLOW_TAKES[side][prior][tier]:FINISH_TAKES[side][tier]],
-    advance:big?40:26,distance:'open'};
+  if(attackStage===4){
+    return {names:[[HIGH_RISE,BODY_KICK,INSIDE_SWEEP][tier][side]],
+      advance:tier===2?20:32,distance:tier===2?'close':'open'};
+  }
+  const take=tier===0?HIGH_ARC[side]:tier===1&&middleLocked(before)?
+    MIDDLE_FINISH[side]:FINISH_TAKES[side][tier];
+  return {names:[take],advance:38,distance:'open'};
 }
 
 function unusedTake(order, before) {
@@ -1643,21 +1654,32 @@ function unusedTake(order, before) {
   return order.find(cut=>!used.includes(cut)) ?? order.find(cut=>cut!==used.at(-1)) ?? order[0];
 }
 
-function guardedMotion(before, result, style) {
-  const tier = result.incoming;
-  const red = before.attacker === 1;
-  const ordinary = GUARD_TAKES[before.attacker][tier];
-  if (red && tier===0 && inClimax(before)) {
-    return unusedTake(['finishHighGuard','highKickGuard',...ordinary],before);
+function guardedMotion(before,result,style) {
+  const tier=result.incoming;
+  const side=before.attacker;
+  const stage=result.attackStage??before.attackStage;
+  const ordinary=GUARD_TAKES[side][tier];
+  if(stage===1){
+    if(tier===0)return UPPER_STOP[side];
+    return ordinary[0];
   }
-  if (red && style === 'kick' && tier < 2) {
-    return unusedTake([tier===0?'highKickGuard':'kickGuard',...ordinary],before);
+  if(stage===2){
+    if(tier===0)return UPPER_GUIDE[side];
+    return ordinary[1];
   }
-  if (tier === 1 && style === 'power') {
-    return unusedTake([red?'heavyGuard':'bluePowerGuard',...ordinary],before);
+  if(stage===3){
+    if(tier===0)return side===0?'blueHighCross':'highKickGuard';
+    if(tier===1)return PRESS_TAKES[side];
+    return 'lowExchange';
   }
-  if (tier === 2 && red && before.contact !== 2 && before.step > 0) {
-    return unusedTake(['lowExchange','redLowStep','lowSlip','lowRelease'],before);
+  if(stage===4){
+    if(tier===0)return side===0?'blueGuard':'finishHighGuard';
+    if(tier===1)return MIDDLE_LOCK[side];
+    return 'blueLowCrowd';
+  }
+  if(tier===1){
+    const strong=side===0?['bluePowerGuard',...ordinary]:['heavyGuard',...ordinary];
+    return unusedTake(openAfterLow(before)?[BODY_KICK_GUARD[side],...strong]:strong,before);
   }
   return unusedTake(ordinary,before);
 }
@@ -1676,13 +1698,7 @@ function reversalMotions(before, result, style) {
 }
 
 function motionFor(before, result, style = 'quick') {
-  if(result.instant) {
-    return {names:[INSTANT_TAKES[result.scored][result.tier]],advance:25,distance:'open'};
-  }
   if(result.heldLeg!=null)return {names:[LEG_RECEIVE[result.heldLeg]],advance:0,distance:'close'};
-  if(result.kind==='bind'&&result.ties===4&&result.incoming===1){
-    return {names:[MIDDLE_LOCK[result.lead]],advance:5,distance:'close'};
-  }
   const priorTier=before.previousTier;
   if(result.kind==='pull'){
     return {names:[result.attacker===0?'bluePull':'redPull'],advance:0,distance:'close'};
@@ -1702,19 +1718,9 @@ function motionFor(before, result, style = 'quick') {
     return {names:reversalMotions(before,result,style),advance:20,distance:wide?'open':'close'};
   }
   if(result.kind==='bind'){
-    if(result.incoming===0&&!inClimax(before)){
-      const next=priorTier===0&&before.lastKind==='bind'&&before.distance==='close'
-        ? UPPER_GUIDE[result.lead]:UPPER_STOP[result.lead];
-      if(!before.takes.includes(next))return {names:[next],advance:5,distance:'close'};
-    }
-    if(result.incoming===1&&openAfterLow(before)){
-      return {names:[BODY_KICK_GUARD[result.lead]],advance:7,distance:'open'};
-    }
-    const pressTake=PRESS_TAKES[result.lead];
-    const pressesMiddle=before.step>0&&priorTier===1&&result.incoming===1&&before.distance==='close'
-      && !before.takes.includes(pressTake);
-    return {names:pressesMiddle?[pressTake]:[guardedMotion(before,result,style)],
-      advance:pressesMiddle?13:5,distance:wide?'open':'close'};
+    const take=guardedMotion(before,result,style);
+    return {names:[take],advance:PRESS_TAKES.includes(take)?13:5,
+      distance:wide&&!MIDDLE_LOCK.includes(take)||BODY_KICK_GUARD.includes(take)?'open':'close'};
   }
   if(result.kind==='hit'){
     return hitAfterContact(before,result);
@@ -2061,7 +2067,7 @@ function voiceExchange(timeline,result,mainSeam,impact,clashAt,scoringHit) {
   if(clashAt!=null){
     contactKey=outcome==='pull'?'gripCheck':result.incoming===2?'lowCheck':
       impact?.key==='armGlance'?'brushCheck':'braceCheck';
-    const emphasis=.83+Math.min(3,result.ties)*.044;
+    const emphasis=.83+Math.min(3,result.attackStage-1)*.044;
     if(impact)Object.assign(impact,{key:contactKey,gain:emphasis,depth:undefined});
     else cues.push({at:clashAt,key:contactKey,gain:emphasis,side:'center'});
     for(const cue of cues){
@@ -2121,11 +2127,11 @@ function startVisual(now, before, result, previous, style, origin=drawState?.x) 
   const voiced=voiceExchange(timeline,result,mainSeam,impact,clashAt,scoringHit);
   const initiativeAt=before.attacker===result.attacker?null:clashAt??cycleMark?.at??scoringHit?.at??mainSeam?.peak??0;
   animation = {...timeline,start:now,x0:from,x1:position,
-    hitTier:result.tier,finishStyle,pace,handoff,
+    hitTier:result.tier,attackStage:result.attackStage,finishStyle,pace,handoff,
     quickPickup:Boolean(overlap),
     scoringHit,cycleMark,...voiced,initiativeAt,initiativeFrom:before.attacker,
     carryClashes:initiativeAt!==null&&result.scored===null&&!result.clearsClashes&&result.ties>0?
-      {from:before.attacker,to:result.attacker,count:result.ties,tier:result.tier}:null,
+      {from:before.attacker,to:result.attacker,count:result.ties,attackStage:before.attackStage,tier:result.tier}:null,
     freezeAt:knockout?scoringHit?.at:null,
     clashAt,clashCount:result.ties,clashTier:result.incoming,clashLead:result.lead,
     endsPhrase:result.done,clearsClashes:result.clearsClashes,
@@ -2213,7 +2219,7 @@ function beginBeat(now,opening=false,firstInputAt=null) {
   const previewTier=current.attacker===1?opponent.tier:current.contact;
   // The light can lead the next pose while the last drawing is still visible.
   const poseAt=opening?cueAt:Math.max(cueAt,settled+24);
-  beat={opponent,attacker:current.attacker,openAt,closesAt,cueAt,holdsPose,filmOpening:firstInputAt!=null,
+  beat={opponent,attacker:current.attacker,attackStage:current.attackStage,openAt,closesAt,cueAt,holdsPose,filmOpening:firstInputAt!=null,
     poseAt,
     hintAt:cueAt+Math.round(timing.cueLead*.43),
     preview:guardedMotion(current,{kind:'bind',incoming:previewTier},plan.style),
@@ -2282,7 +2288,7 @@ function setClashes(count,now) {
   contactStatus.textContent=count?'ガッ '+count+'回':'';
   if(!count){
     clashTransfer=null;
-    fadingChoices=now===undefined?null:{at:now,count:Math.max(0,clashFlash?.count??0),choices:chosenTiers.slice()};
+    fadingChoices=now===undefined?null:{at:now,attackStage:animation?.attackStage??1,choices:chosenTiers.slice()};
     chosenTiers.fill(null);
     clashFlash=null;
   }
@@ -2343,7 +2349,7 @@ function showDamage(now,event) {
   mark.setProperty('--damage-offset',hp+'%');
   mark.setProperty('--damage-cells',String(Math.max(1,(old-hp)/CLASH_DAMAGE)));
   mark.setProperty('--damage-mark',heavy?'#ffcf82':'#e8c691');
-  damageFlash={at:now,side:hurt,amount:event.amount,tier:animation.hitTier,chain:clashCount,ko:hp===0,
+  damageFlash={at:now,side:hurt,amount:event.amount,tier:animation.hitTier,chain:(event.amount-BASE_HIT_DAMAGE)/CLASH_DAMAGE,ko:hp===0,
     style:animation.finishStyle,focus:contactPoint(animation.start+event.at,event.damage,animation.hitTier),
     maxDuration:animation.nextAt===null?Infinity:Math.max(210,animation.nextAt-now+66)};
   if(event.strikeName){
@@ -2407,7 +2413,7 @@ function startRound() {
   resetInputs();
   const now=performance.now();
   current={step:0,attacker:1,contact:1,previousTier:null,grip:null,pulled:false,heldLeg:null,legTaken:false,
-    ties:0,takes:[],hp:[100,100],position:0,distance:'open',lastKind:'brush',blueAttacks:[],blueGuards:[],
+    ties:0,attackStage:1,takes:[],hp:[100,100],position:0,distance:'open',lastKind:'brush',blueAttacks:[],blueGuards:[],
     redSatOut:false,redSpeedLosses:0};
   redAttack=null;
   redPlanCount=Math.floor(Math.random()*RED_PLANS.length);
@@ -2496,10 +2502,12 @@ function resolveBeat(now) {
   current.heldLeg=result.heldLeg??null;
   current.legTaken=current.legTaken||result.heldLeg!=null;
   current.attacker=result.attacker;
+  current.attackStage=result.nextAttackStage;
   current.lastKind=result.kind;
   current.step=result.step;
   if(result.done||result.clearsClashes){
     current.ties=0;
+    current.attackStage=1;
     current.takes=[];
     current.step=0;
     current.previousTier=null;
@@ -2530,7 +2538,7 @@ function tickAnimation(now) {
     animation.readMark=null;
   }
   if(animation.clashAt!=null&&elapsed>=animation.clashAt){
-    clashFlash={at:now,tier:animation.clashTier,count:animation.clashCount,key:animation.contactKey,
+    clashFlash={at:now,tier:animation.clashTier,count:animation.clashCount,attackStage:animation.attackStage,key:animation.contactKey,
       point:contactPoint(animation.start+animation.clashAt,animation.clashLead,animation.clashTier)};
     setClashes(animation.clashCount);
     showTier(0,animation.clashTier,now);
